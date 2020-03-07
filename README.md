@@ -20,9 +20,9 @@ If the solvency equation is false, a liquidation() function may be successfully 
 assigns the synths and the collateral to the Lender.
 
 ## Example Use Cases
-Alice wants to trade with 5X leverage and is willing to pay 8% APR. She creates a smart contract with those parameters and deposits Eth as collateral. Bob sees it, thinks Alice's terms are reasonable, and sends sUSD to the contract that is used to fund Alice's trading.
+Alice wants to trade with 5X leverage and is willing to pay 8% APR. She creates a smart contract with those parameters and deposits Eth as collateral. Bob sees it, thinks Alice's terms are reasonable, and deposits sUSD to the contract that is used to fund Alice's trading.
 			
-Alice wants to trade the forex and commodity synths with 15X leverage and is willing to pay 8% APR. Bob thinks that 15X leverage is generally high, but recognizes that Alice has limited herself to low-volatility synths. Bob funds the loan after Alice deposits Eth as collateral. 
+Alice wants to trade the forex and commodity synths with 15X leverage and is willing to pay 8% APR. Bob thinks that 15X leverage is generally high, but recognizes that Alice has limited herself to low-volatility synths. Bob funds the loan with sUSD after Alice deposits Eth as collateral. 
 
 ## Detailed Description
 
