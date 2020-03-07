@@ -25,9 +25,11 @@ Alice wants to trade with 5X leverage and is willing to pay 8% APR. She creates 
 Alice wants to trade the forex and commodity synths with 15X leverage and is willing to pay 8% APR. Bob thinks that 15X leverage is generally high, but recognizes that Alice has limited herself to low-volatility synths. Bob funds the loan with sUSD after Alice deposits Eth as collateral. 
 
 ## Detailed Description
-
-
-## Synth Name to Currency Keys
+<TODO>
+	
+## Smart Contract Direct Interaction
+<TODO>
+	
 
 
 
