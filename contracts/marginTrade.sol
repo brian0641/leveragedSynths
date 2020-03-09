@@ -37,18 +37,18 @@ contract marginTrade {
     
     bytes32 private constant sUSD = "sUSD";
     bytes32 private constant sETH = "sETH";
-    uint constant IM_BUFFER_OVER_MM = 0;
+    uint constant IM_BUFFER_OVER_MM = 200;
     uint constant e18 = 10**18;
     uint constant SECONDS_IN_YEAR = 31557600;
     
     //TODO - is there a better way to do this? A change in the address should not break the system.
     //mainnet addresses
-    //address constant public exchRateAddress = 0x9D7F70AF5DF5D5CC79780032d47a34615D1F1d77;
-    //address constant public synthetixContractAddress = 0xC011A72400E58ecD99Ee497CF89E3775d4bd732F;
+    address constant public exchRateAddress = 0x9D7F70AF5DF5D5CC79780032d47a34615D1F1d77;
+    address constant public synthetixContractAddress = 0xC011A72400E58ecD99Ee497CF89E3775d4bd732F;
     
     //kovan
-    address constant public exchRateAddress = 0x29A74bBDFd3eBAE39BFF917AAF4dAE8D3d505cf0;
-    address constant public synthetixContractAddress = 0x22f1ba6dB6ca0A065e1b7EAe6FC22b7E675310EF;
+    //address constant public exchRateAddress = 0x29A74bBDFd3eBAE39BFF917AAF4dAE8D3d505cf0;
+    //address constant public synthetixContractAddress = 0x22f1ba6dB6ca0A065e1b7EAe6FC22b7E675310EF;
     
     // ========== STATE VARIABLES ==========
     
@@ -329,7 +329,8 @@ contract marginTrade {
     
     /**
      * @notice If the maxLoanDuration has elapsed, either the trader or lender may
-     * @notice call this function .
+     * @notice call this function. Doing so assigns synths/eth to the lender until the 
+     * @notice current loan balance is satisfied.
      */
     function loanExpired_Close()
         public
@@ -524,15 +525,14 @@ contract marginTrade {
     }
     
     /**
-     * @notice Convenience function to allow someone interacting through etherscan to easily
-     * @notice see the eth balance in wei.
+     * @notice Eth Balance, in wei, of the Trader. 
      */
-    function getEthInContract()
+    function traderEthBalance()
         public
         view
         returns (uint)
     {
-        return  address(this).balance;
+        return  sub(address(this).balance, lenderEthBalance);
     }
     
     function isLoanExpired()
@@ -540,6 +540,9 @@ contract marginTrade {
         view
         returns (bool)
     {
+        if (loanStartTS == 0) {
+            return false;
+        }
         return (now - loanStartTS) > maxDurationSecs;
     }
     
