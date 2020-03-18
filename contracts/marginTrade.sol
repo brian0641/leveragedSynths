@@ -28,6 +28,23 @@ sv - lv * (1+im) + cv > 0
 im and mm are stored in units of basis points (i.e., 100 equals 1%).
 */
 
+//TODOS 
+/* 
+   -add minLoanAmount parameter to give trader a way to specify a desired range for the loan;
+      alternatively, require that the funding tx completely fund the loan
+   - must provide a way to handle change of contract addresses - possible have an admin address for updating contract address.?
+   - add safety check in trade to prevent many atomic griefing trades?
+   -liquidate should be incentivized
+   -more than one lender?
+   -self-destruct contract?
+   -DAI collateral
+   -convenience functions for withdrawing etc.
+   -if loan is payed, add an option to force close on the lender after X hours: push all lender's funds to the lender address
+        and allow trader to request a new loan and maybe update the synths 
+   DONE TODOs:
+   - must provide a way to handle settle => settle is callable by anyone on behalf of anyone else. so no need here.
+*/
+
 pragma solidity ^0.5.11;
 
 import {SynthetixInterface, SynthInterface, ExchRatesInterface} from "marginTradeInterfaces.sol";
@@ -37,18 +54,21 @@ contract marginTrade {
     
     bytes32 private constant sUSD = "sUSD";
     bytes32 private constant sETH = "sETH";
-    uint constant IM_BUFFER_OVER_MM = 200;
+    uint public constant IM_BUFFER_OVER_MM = 200;
     uint constant e18 = 10**18;
     uint constant SECONDS_IN_YEAR = 31557600;
     
-    //TODO - is there a better way to do this? A change in the address should not break the system.
     //mainnet addresses
-    address constant public exchRateAddress = 0x9D7F70AF5DF5D5CC79780032d47a34615D1F1d77;
-    address constant public synthetixContractAddress = 0xC011A72400E58ecD99Ee497CF89E3775d4bd732F;
+    //address constant public exchRateAddress = 0x9D7F70AF5DF5D5CC79780032d47a34615D1F1d77;
+    //address constant public synthetixContractAddress = 0xC011A72400E58ecD99Ee497CF89E3775d4bd732F;
     
     //kovan
     //address constant public exchRateAddress = 0x29A74bBDFd3eBAE39BFF917AAF4dAE8D3d505cf0;
     //address constant public synthetixContractAddress = 0x22f1ba6dB6ca0A065e1b7EAe6FC22b7E675310EF;
+    
+    //ropsten
+    address constant public exchRateAddress = 0x420a57027742E73804ecC8D2aa5315146fCdFD52;
+    address constant public synthetixContractAddress = 0xdbD3C42E3Fc52fD1cae25e9efb1af8dfdacA1B13;
     
     // ========== STATE VARIABLES ==========
     
@@ -73,7 +93,6 @@ contract marginTrade {
     // ========== CONSTRUCTOR ==========
     /**
      * @notice Deploy a new tradeProxy contract through the factory.
-     * @param  _lenderAddress The address of the lender.
      * @param  _traderAddress The address of the Trader.
      * @param  _APR The annual interest rate, paid to the lender. Expressed in units of basis points.
      * @param  _maxDurationSecs The max period of the loan.
@@ -84,7 +103,6 @@ contract marginTrade {
      */
     
     constructor(
-                address payable _lenderAddress, 
                 address payable _traderAddress,
                 uint256 _APR,
                 uint256 _maxDurationSecs,
@@ -95,7 +113,6 @@ contract marginTrade {
                 )
         public
     {
-        lender = _lenderAddress;
         trader = _traderAddress; 
         APR = _APR;
         maxDurationSecs = _maxDurationSecs;
@@ -116,10 +133,6 @@ contract marginTrade {
         for (uint i = 0; i < approvedSynths.length; i++) {
             synthToAddress[approvedSynths[i]] = _approvedSynthAddresses[i];
         }
-        
-        //TODO ? - check to ensure synth addresses are actual Synthetix Synth addresses 
-        //     and the currencykeys are correct and there are no duplicates ??? Alternatively,
-        //     do this at the application layer.
     }
     
     function() external payable {}
@@ -149,6 +162,14 @@ contract marginTrade {
     {
         require(token.currencyKey() == sUSD, "Loan deposit must be sUSD"); 
         require(amount > 0);
+        
+        //The first person that funds gets be the Lender for contract
+        if (lender != address(0x0)) {
+            require(lender == msg.sender);
+        }
+        else {
+            lender = msg.sender;
+        }
         
         uint _svPre = traderTotSynthValueUSD();
         uint _newLoanBalance = loanBalUSD() + amount;
@@ -182,8 +203,6 @@ contract marginTrade {
                    public
                    returns (uint)
     {
-        //TODO - add safety check to prevent many atomic griefing trades?
-       
         require(msg.sender == trader);
         
         //Can't trade lender funds
@@ -222,7 +241,6 @@ contract marginTrade {
     * @notice Trader can call this function to withdraw collateral (eth) from the contract.
     * @notice Eth is withdrawable up to the extent of: sv + cv > lv * (1+im) 
     * @param  amt The amount of Eth to withdraw.
-    * @return Whether the withdraw was successful.
     */
     function traderWithdrawEth(uint amt) 
         public
@@ -408,7 +426,7 @@ contract marginTrade {
         view
         returns (bool)
     {   
-        if (wasLiquidated) {
+        if (wasLiquidated || loanStartTS == 0) {
             return false;
         }
         
@@ -514,7 +532,7 @@ contract marginTrade {
     }
     
     /**
-     * @notice Returns the USD equivalent of the contract Eth that belongs to the lender. 
+     * @notice Returns the USD equivalent of the contract Eth that belongs to the trader.. 
      */
     function collValueUSD()
         public
