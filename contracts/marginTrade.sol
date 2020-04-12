@@ -1,6 +1,6 @@
 /*
 A simple contract for P2P margin lending and trading in the synthetix ecosystem.
-The Lender deposits sUSD to the contract and the trader deposits Eth collateral. The trader
+The Lender deposits sUSD to the contract and the trader deposits synths as collateral. The trader
 may place trades through a trade() call, which acts as a proxy to Synthetix.exchange().
 
 Key Terms:
@@ -9,107 +9,84 @@ Trader: the party depositing ETH as collateral for the loan.
 
 synth_value (sv) - Total sUSD value of the synths in the contract.
 loan_value (lv)  - Value owed to Lender at a given point in time.
-collateral_value (cv) - The sUSD equivalent value of the eth collateral.
 maintenance margin (mm) - A buffer amount (e.g., 3%) to allow for slippage in liquidations.
 
 For the trader to remain solvent, the following should be enforced:
 
-sv - lv * (1+mm) + cv > 0
+sv > lv * (1+mm)
 
 If the solvency equation is false, a liquidation() function may be successfully called. Doing so 
-assigns the synths and the collateral to the Lender.
+assigns the synths to the Lender.
 
 For withdraws while a loan is active, an initial margin (im) factor is used. im is defined
-as mm plus a constant (e.g., im = 3% (mm) + 1% = 4%). While a loan is active, a trader may withdraw Eth 
-collateral or synths only to the extent:
+as mm plus a constant (e.g., im = 3% (mm) + 1% = 4%). While a loan is active, a trader may withdraw 
+synths only to the extent:
 
-sv - lv * (1+im) + cv > 0
+sv > lv * (1+im)
 
 im and mm are stored in units of basis points (i.e., 100 equals 1%).
 */
 
-//TODOS 
-/* 
-   -add minLoanAmount parameter to give trader a way to specify a desired range for the loan;
-      alternatively, require that the funding tx completely fund the loan
-   - must provide a way to handle change of contract addresses - possible have an admin address for updating contract address.?
-   - add safety check in trade to prevent many atomic griefing trades?
-   -liquidate should be incentivized
-   -more than one lender?
-   -self-destruct contract?
-   -DAI collateral
-   -convenience functions for withdrawing etc.
-   -if loan is payed, add an option to force close on the lender after X hours: push all lender's funds to the lender address
-        and allow trader to request a new loan and maybe update the synths 
-   DONE TODOs:
-   - must provide a way to handle settle => settle is callable by anyone on behalf of anyone else. so no need here.
-*/
+
 
 pragma solidity ^0.5.11;
 
-import {SynthetixInterface, SynthInterface, ExchRatesInterface} from "marginTradeInterfaces.sol";
+import {SynthetixInterface, SynthInterface, IAddressResolver, ExchRatesInterface} from "marginTradeInterfaces.sol";
 
 contract marginTrade {
-    // ========== CONSTANTS ==========
+    // ========== SYSTEM CONSTANTS ==========
     
     bytes32 private constant sUSD = "sUSD";
-    bytes32 private constant sETH = "sETH";
     uint public constant IM_BUFFER_OVER_MM = 200;
     uint constant e18 = 10**18;
     uint constant SECONDS_IN_YEAR = 31557600;
     
-    //mainnet addresses
-    //address constant public exchRateAddress = 0x9D7F70AF5DF5D5CC79780032d47a34615D1F1d77;
-    //address constant public synthetixContractAddress = 0xC011A72400E58ecD99Ee497CF89E3775d4bd732F;
+    address public SNX_RESOLVER_ADDR = 0xA1D03F7bD3e298DFA9EED24b9028777eC1965B3A; //Ropsten Address
+    bytes32 private constant CONTRACT_SYNTHETIX = "Synthetix";                      //for address resolution
+    bytes32 private constant CONTRACT_EXCHANGE_RATES = "ExchangeRates";
+     
     
-    //kovan
-    //address constant public exchRateAddress = 0x29A74bBDFd3eBAE39BFF917AAF4dAE8D3d505cf0;
-    //address constant public synthetixContractAddress = 0x22f1ba6dB6ca0A065e1b7EAe6FC22b7E675310EF;
+    //This is needed in case the snxResolverAddr is changed and needs to be updated.
+    address public constant adminAddress = 0xB75Af109Ca1A6dB7c6B708E1292ee8fCc5b0B941;
     
-    //ropsten
-    address constant public exchRateAddress = 0x420a57027742E73804ecC8D2aa5315146fCdFD52;
-    address constant public synthetixContractAddress = 0xdbD3C42E3Fc52fD1cae25e9efb1af8dfdacA1B13;
+    // ========== PUBLIC STATE VARIABLES ==========
     
-    // ========== STATE VARIABLES ==========
-    
-    address payable public lender;
-    address payable public trader;
-    uint public APR;                             // in units of basis points
-    uint public maxDurationSecs;                 // loan duration
-    uint public maxLoanAmt;                     //the maximum loan amount desired by the Trader
-    bytes32[] public approvedSynths;                    //list of synths that can be traded by this contract
+    address public lender;
+    address public trader;
+    uint public APR;                                     // in units of basis points
+    uint public maxDurationSecs;                         // loan duration
+    uint public maxLoanAmt;                              //the maximum loan amount desired by the Trader
+    bytes32[] public approvedSynths;                     //list of synths that can be traded by this contract
     mapping(bytes32 => uint) public lenderSynthBalances; //synths balances allocated to the Lender.
-    uint public lenderEthBalance;
-    uint public loanStartTS;                        //loan start timestamp
-    uint public mm;                     //maintenance margin. value is in basis point (e.g., 100 is 1%)
+    uint public loanStartTS;                             //loan start timestamp
+    uint public mm;                                      //maintenance margin. value is in basis point (e.g., 100 is 1%)
     bool public wasLiquidated = false;
     
-    mapping(bytes32 => address) synthToAddress;  //synth key => address of the erc20 contracts
+    // =========== INTERNAL STATE ==========
+    mapping(bytes32 => address) private addressCache;  
     
     //The current loan balance (lv) is equal to loanBalance + the interest accrued between lastLoanTS and now;
-    uint256 private loanBalance;
+    uint private loanBalance;
     uint private lastLoanSettleTS;
     
     // ========== CONSTRUCTOR ==========
     /**
-     * @notice Deploy a new tradeProxy contract through the factory.
+     * @notice Deploy a new tradeProxy contract.
      * @param  _traderAddress The address of the Trader.
      * @param  _APR The annual interest rate, paid to the lender. Expressed in units of basis points.
      * @param  _maxDurationSecs The max period of the loan.
      * @param  _maxLoanAmt The requested amount of sUSD that is to be borrowed by the trader.
      * @param  _mm   The minimum maintenance margin.
      * @param  _approvedSynths Array of synths that can be traded. Must include sUSD.
-     * @param  _approvedSynthAddresses Synth contract addresses of the synths.
      */
     
     constructor(
-                address payable _traderAddress,
+                address _traderAddress,
                 uint256 _APR,
                 uint256 _maxDurationSecs,
                 uint256 _maxLoanAmt,
                 uint _mm,
-                bytes32[] memory _approvedSynths,
-                address[] memory _approvedSynthAddresses
+                bytes32[] memory _approvedSynths
                 )
         public
     {
@@ -124,18 +101,17 @@ contract marginTrade {
         for(uint i = 0; i < _approvedSynths.length; i++) {
             if (_approvedSynths[i] == sUSD) {
                 sUSDFound = true;
+                break;
             }
         }
         require(sUSDFound, "sUSD must be among the approved synths.");
         approvedSynths = _approvedSynths;
         
-        require(approvedSynths.length == _approvedSynthAddresses.length, "lengths dont match.");
-        for (uint i = 0; i < approvedSynths.length; i++) {
-            synthToAddress[approvedSynths[i]] = _approvedSynthAddresses[i];
-        }
+        //fetch the initial addresses of the syntetix contracts and store in 
+        //addressCache
+        _fillAddressCache();
+        
     }
-    
-    function() external payable {}
     
     // ========== SETTERS ==========
     
@@ -148,6 +124,14 @@ contract marginTrade {
     {
         require(msg.sender == trader, "Only the Trader can change the desired max loan amt");
         maxLoanAmt = _maxLoanAmt;
+    }
+    
+    //This is needed in case the SNX addresses resolver changes
+    function setSNXAddressResolver(address _newAddress)
+        external
+    {
+        require(msg.sender == adminAddress, "only the admin can call this");
+        SNX_RESOLVER_ADDR = _newAddress;
     }
     
     // ========== FUNCTIONS ==========
@@ -165,7 +149,7 @@ contract marginTrade {
         
         //The first person that funds gets be the Lender for contract
         if (lender != address(0x0)) {
-            require(lender == msg.sender);
+            require(lender == msg.sender, "only the lender can call this");
         }
         else {
             lender = msg.sender;
@@ -177,7 +161,7 @@ contract marginTrade {
         require(_newLoanBalance <= maxLoanAmt, "loan amount too high");
         
         //enforce solvency contstraint
-        require( isInitialMarginSatisfied(_svPre + amount, collValueUSD(), 
+        require( isInitialMarginSatisfied(_svPre + amount,
                                            _newLoanBalance, mm), "Not enough collateral in the contract.");
                                            
         require(token.transferFrom(msg.sender, address(this), amount), "token transfer failed");
@@ -209,14 +193,14 @@ contract marginTrade {
         require(synthBalanceTrader(sourceCurrencyKey) >= sourceAmount,
                 "trader does not have enough balance");
         
-        return SynthetixInterface( synthetixContractAddress).exchange(sourceCurrencyKey,
+        return SynthetixInterface(addressCache[CONTRACT_SYNTHETIX]).exchange(sourceCurrencyKey,
                    sourceAmount, destCurrencyKey);
     }
     
     /**
      * @notice Liquidation may be called by any address and is successful if the solvency
      * @notice equation is false. Liquidation causes the Lender to be assigned the assets
-     * @notice of the Trader. Solvency Equation: sv - lv *(1+mm) + cv > 0
+     * @notice of the Trader (all the assets in the contrcat). 
      */
      function liquidate()
         public
@@ -226,54 +210,20 @@ contract marginTrade {
         
         if (isLiquidationable()) {
             //Liquidation; transfer all assets to the lender
-            lenderEthBalance = address(this).balance;
             for (uint i = 0; i < approvedSynths.length; i++) {
-                uint _bal = SynthInterface(synthToAddress[approvedSynths[i]]).balanceOf(address(this));
+                uint _bal = SynthInterface(addressCache[approvedSynths[i]]).balanceOf(address(this));
                 lenderSynthBalances[approvedSynths[i]] = _bal;
             }
             wasLiquidated = true;
         } else {
             revert("not liquidation eligible");
         }
-    }
-    
-    /**
-    * @notice Trader can call this function to withdraw collateral (eth) from the contract.
-    * @notice Eth is withdrawable up to the extent of: sv + cv > lv * (1+im) 
-    * @param  amt The amount of Eth to withdraw.
-    */
-    function traderWithdrawEth(uint amt) 
-        public
-        payable
-    {
-        require(msg.sender == trader, "Only trader can withdraw eth");
-        require(amt <=  address(this).balance - lenderEthBalance, "withdraw amt too high");
         
-        uint usdAmt = getRate(sETH) * amt / e18;
-        
-        if (isInitialMarginSatisfied(traderTotSynthValueUSD(), collValueUSD() - usdAmt, loanBalUSD(), mm)) {
-            address(trader).transfer(amt);    
-        } else {
-            revert("Cant withdraw that much");
-        }
-    }
-    
-    /**
-    * @notice Lender can call this function, after a liquidation, to withdraw eth from the contract.
-    */
-    function lenderWithdrawEth(uint amt) 
-        public
-        payable
-    {
-        require(msg.sender == lender, "Only lender can withdraw eth");
-        require(amt <=  lenderEthBalance);
-        address(lender).transfer(amt);  
-        lenderEthBalance = lenderEthBalance - amt;
     }
     
     /**
     * @notice Trader can call this function to withdraw synths from the contract.
-    * @notice The synths are withdrawable up to the extent of: sv + cv > lv * (1+im) 
+    * @notice The synths are withdrawable up to the extent of: sv > lv * (1+im) 
     * @param  amt The amount of the synth to withdraw.
     * @param  currencyKey The currency key of the synth to withdraw.
     */
@@ -282,12 +232,12 @@ contract marginTrade {
         returns (bool)
     {
         require(msg.sender == trader, "Only trader can withdraw synths.");
-        require(synthToAddress[currencyKey] != address(0), "currency key not in approved list");
+        require(addressCache[currencyKey] != address(0), "currency key not in approved list");
         
         uint usdAmt = _synthValueUSD(getRate(currencyKey), amt);
         
-        if (isInitialMarginSatisfied(traderTotSynthValueUSD() - usdAmt, collValueUSD(), loanBalUSD(), mm) ) {
-            return  SynthInterface( synthToAddress[currencyKey]).transfer(trader, amt); 
+        if (isInitialMarginSatisfied(traderTotSynthValueUSD() - usdAmt, loanBalUSD(), mm) ) {
+            return   SynthInterface(addressCache[currencyKey]).transfer(trader, amt); 
         }
         revert("Cant withdraw that much");
     }
@@ -304,7 +254,7 @@ contract marginTrade {
         require(msg.sender == lender, "Only lender can withdraw synths.");
         require(lenderSynthBalances[currencyKey] >= amt, "Withdraw amt is too high.");
         
-        bool result = SynthInterface( synthToAddress[currencyKey]).transfer(lender, amt); 
+        bool result =  SynthInterface(addressCache[currencyKey]).transfer(lender, amt); 
         if (result) {
             lenderSynthBalances[currencyKey] = lenderSynthBalances[currencyKey] - amt;
         }
@@ -347,9 +297,10 @@ contract marginTrade {
     
     /**
      * @notice If the maxLoanDuration has elapsed, either the trader or lender may
-     * @notice call this function. Doing so assigns synths/eth to the lender until the 
+     * @notice call this function. Doing so assigns synths to the lender until the 
      * @notice current loan balance is satisfied.
      */
+     //TODO - refactor 
     function loanExpired_Close()
         public
         returns (bool)
@@ -359,7 +310,7 @@ contract marginTrade {
         
         maxLoanAmt = 0;  //effectively close further loan deposits
         
-        // Iterate through the synths/collateral and assign them to the lender until loan balance
+        // Iterate through the synths and assign them to the lender until loan balance
         // is satisfied.
         uint totalRemainaingUSD = loanBalUSD();
         uint _usdAssigned; uint _weiAssigned;
@@ -397,23 +348,36 @@ contract marginTrade {
             }
         }
         
-        //Eth
-        (_usdAssigned, _weiAssigned) = _determineAssignableAmt(totalRemainaingUSD, 
-                                                            sub(address(this).balance, lenderEthBalance),
-                                                            getRate(sETH));
-        if (_weiAssigned > 0) {
-            totalRemainaingUSD = sub(totalRemainaingUSD, _usdAssigned);
-            lenderEthBalance = lenderEthBalance + _weiAssigned;
-        }
-        if (totalRemainaingUSD == 0) {
-            loanBalance = 0;  
-            lastLoanSettleTS = now;
-            return true;
-        }
-        
+        // This is an error condition and implies that there was not enough 
+        // synth balance to cover the loan. How to handle?
         loanBalance = totalRemainaingUSD;  
         lastLoanSettleTS = now;
         return false;
+    }
+    
+    /**
+     * @notice This function needs to be called if the Synthetix addresses change. 
+     */
+    function updateAddressCache() 
+        external
+    {
+        require(msg.sender == trader || 
+                msg.sender == lender ||
+                msg.sender == adminAddress, "only callable by trader, lender, or admin");
+        _fillAddressCache();
+    }
+    
+    
+    function _fillAddressCache() 
+        internal
+    {
+        addressCache[CONTRACT_SYNTHETIX] = _getContractAddress(CONTRACT_SYNTHETIX);
+        addressCache[CONTRACT_EXCHANGE_RATES] = _getContractAddress(CONTRACT_EXCHANGE_RATES);
+        
+        for (uint i = 0; i < approvedSynths.length; i++) {
+            addressCache[approvedSynths[i]] = address(_getSynthAddress(approvedSynths[i]));
+        }
+         
     }
     
     // VIEW FUNCTIONS
@@ -432,10 +396,9 @@ contract marginTrade {
         
         uint sv = traderTotSynthValueUSD();
         uint lv = loanBalUSD();
-        uint cv = collValueUSD();
         uint f = (10**18 + mm * 10*14);
         
-        if ( (sv + cv) > mul(f, lv) / e18 ) 
+        if ( sv > mul(f, lv) / e18 ) 
         {
             //liq not possible
             return false;
@@ -447,18 +410,17 @@ contract marginTrade {
      * @notice Determine if the account, after deducting some value (in USD), still satisfies the
      * @notice mimimum initial margin requirement. 
      * @param _sv Total trader synth value in USD
-     * @param _cv Total trader collateral value in USD
      * @param _lv Total trader loan value in USD
      * @param _mm  maintenance margin
      */
-    function isInitialMarginSatisfied(uint _sv, uint _cv, uint _lv, uint _mm)
+    function isInitialMarginSatisfied(uint _sv, uint _lv, uint _mm)
         public
         pure
         returns (bool)
     {
         uint f = (10**18 + (_mm + IM_BUFFER_OVER_MM) * 10**14);
         
-        if ( (_sv + _cv) >= mul(f, _lv)/e18 ) 
+        if ( _sv >= mul(f, _lv)/e18 ) 
         {
             return true; //initial margin condition still ok
         }
@@ -473,7 +435,7 @@ contract marginTrade {
         view
         returns (uint)
     {
-        return ExchRatesInterface(exchRateAddress).rateForCurrency(currencyKey);
+        return ExchRatesInterface(addressCache[CONTRACT_EXCHANGE_RATES]).rateForCurrency(currencyKey);
     }
     
     
@@ -485,7 +447,7 @@ contract marginTrade {
         view
         returns (uint[] memory)
     {
-        return ExchRatesInterface(exchRateAddress).ratesForCurrencies(currencyKeys);
+        return ExchRatesInterface(addressCache[CONTRACT_EXCHANGE_RATES]).ratesForCurrencies(currencyKeys);
     }
     
     /**
@@ -507,14 +469,15 @@ contract marginTrade {
 
     /**
      * @notice Return the balance for the synth (in synth units) that is held by the contract and assigned 
-     * @notice to the Trader.
+     * @notice to the Trader. The Trader synth balance is defined as the synth balance of the contract 
+     * @notice minus any amt allocated to the Lender.
      */
     function synthBalanceTrader(bytes32 currencyKey)
         public
         view
         returns (uint)
     {
-        uint _bal = SynthInterface(synthToAddress[currencyKey]).balanceOf(address(this));
+        uint _bal =  SynthInterface(addressCache[currencyKey]).balanceOf(address(this));
         
         return _bal - lenderSynthBalances[currencyKey];
     }
@@ -531,28 +494,6 @@ contract marginTrade {
         return loanBalance + interest;
     }
     
-    /**
-     * @notice Returns the USD equivalent of the contract Eth that belongs to the trader.. 
-     */
-    function collValueUSD()
-        public
-        view
-        returns (uint)
-    {
-        return mul(getRate(sETH), address(this).balance - lenderEthBalance) / 1e18;
-    }
-    
-    /**
-     * @notice Eth Balance, in wei, of the Trader. 
-     */
-    function traderEthBalance()
-        public
-        view
-        returns (uint)
-    {
-        return  sub(address(this).balance, lenderEthBalance);
-    }
-    
     function isLoanExpired()
         public
         view
@@ -567,7 +508,6 @@ contract marginTrade {
     
     /**
      * @notice Convenience function to get the users Leverage multiplied by 100.
-     * @notice Leverage is a measure of risk and is calculated as: (sv*100) / (cv+lv)
      */
     function levTimes100()
         public
@@ -576,8 +516,7 @@ contract marginTrade {
     {
         uint sv = traderTotSynthValueUSD();
         uint lv = loanBalUSD();
-        uint cv = collValueUSD();
-        return 100 * lv / (sv + cv - lv);
+        return 100 * lv / (sv - lv);
     }
     
     //
@@ -603,9 +542,17 @@ contract marginTrade {
         return n/d;
     }
     
-    // Given a synth and a maximimum amount in USD to assign to the Lender, determine the 
-    // amount that can be assigned. Returns the assignable amount in USD and synth units. balWei
-    // is the Trader's native balance.
+    // Given a maximimum amount in USD that is to be assigned to the Lender, and given a particular 
+    // synth balance and exchange rate, determine the 
+    // amount that can be assigned. Returns the assignable amount in USD and synth units. 
+    /**
+     * @notice Given a maximimum amount in USD that is to be assigned to the Lender, and given a particular 
+     * @notice  synth balance and exchange rate, determine the 
+     * @notice amount that can be assigned. Returns the assignable amount in USD and synth units. 
+     * @param  maxAssignUSD The potential maximum USD amount that is to be assigned to the Lender.
+     * @param  balWei  The Trader's synth balance.
+     * @param  rate    The current exchange rate of the synth.
+     */ 
     function _determineAssignableAmt(uint maxAssignUSD, uint balWei, uint rate)
         private
         pure
@@ -618,7 +565,7 @@ contract marginTrade {
         uint balUSD = _synthValueUSD(rate, balWei);
         
         if (maxAssignUSD >= balUSD) {
-            return (maxAssignUSD - balUSD, balWei);
+            return (balUSD, balWei);
         } else {
             return (maxAssignUSD, mul(balWei, maxAssignUSD) / balUSD) ;
         }
@@ -653,13 +600,33 @@ contract marginTrade {
         return c;
     }
 
-    
+     /**
+     * @notice Given a synth amount and exchange rate, return the USD value.
+     */ 
     function _synthValueUSD(uint rate, uint balance) 
         public
         pure
         returns (uint)
     {
         return mul(rate, balance) / e18;
-    }    
+    }  
+    
+    function _getContractAddress(bytes32 contractName) 
+        private
+        view
+        returns (address)
+    {
+            return IAddressResolver(SNX_RESOLVER_ADDR).requireAndGetAddress(contractName, "bad address resolution");
+    }
+    
+     function _getSynthAddress(bytes32 synthName)
+        private
+        view
+        returns (address)
+    {
+        address _addr = address(SynthetixInterface(addressCache[CONTRACT_SYNTHETIX]).synths(synthName));
+        require(_addr != address(0), "bad synth address resolution");
+        return _addr;
+    }
     
 }

@@ -4,7 +4,7 @@ contract SynthetixInterface {
     function exchange(bytes32 sourceCurrencyKey, uint sourceAmount, bytes32 destinationCurrencyKey)
         external 
         returns (uint amountReceived);
-    function synths(bytes32 currencyKey) public view returns (address);
+    function synths(bytes32) public view returns (SynthInterface); 
 }
 
 contract SynthInterface {
@@ -17,6 +17,10 @@ contract SynthInterface {
 contract ExchRatesInterface {
     function rateForCurrency(bytes32 currencyKey) external view returns (uint);
     function ratesForCurrencies(bytes32[] calldata currencyKeys) external view returns (uint256[] memory);
+}
+
+contract IAddressResolver {
+    function requireAndGetAddress(bytes32 name, string memory reason) public view returns (address);
 }
 
 

@@ -21,7 +21,6 @@ contract tradeProxyFactory {
      * @param  maxDurationSecs The max period of the loan.
      * @param  mm   The minimum maintenance margin.
      * @param  approvedSynths Array of synths that can be traded. Must include sUSD.
-     * @param  approvedSynthAddresses Synth contract addresses of the synths.
      */
   function newMarginTradeContract(
                 address payable traderAddress,
@@ -29,14 +28,13 @@ contract tradeProxyFactory {
                 uint256 maxDurationSecs,
                 uint256 maxLoanAmt,
                 uint mm,
-                bytes32[] memory approvedSynths,
-                address[] memory approvedSynthAddresses
+                bytes32[] memory approvedSynths
                 )
         public
     returns(address newContract)
   {
     address tp = address(new marginTrade(traderAddress, APR, maxDurationSecs,  
-                                         maxLoanAmt, mm, approvedSynths, approvedSynthAddresses
+                                         maxLoanAmt, mm, approvedSynths
                                          ));
     marginTradeContracts.push(tp);
     
